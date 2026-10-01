@@ -1,4 +1,5 @@
 <resources>
     <string name="accessibility_summary">显示全屏展开效果，并把触控送回原应用</string>
     <string name="accessibility_description">Duo Fold 使用辅助服务显示展开效果，并在效果运行时接收触摸，通过已授权的 Shizuku 把修正后的坐标送回原应用。屏幕画面仅在本机内存中处理，不保存、不上传。只有在应用内点击开始后才启用效果。三指同时触屏或通知栏的停止按钮可立即退出。停止、断联或息屏时恢复原始触控。</string>
+    <string name="service_label">Duo Fold 屏幕效果</string>
 </resources>

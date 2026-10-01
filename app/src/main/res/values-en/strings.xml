@@ -1,0 +1,5 @@
+<resources>
+    <string name="accessibility_summary">Shows a full-screen fold effect and sends touches back to the app underneath</string>
+    <string name="accessibility_description">Duo Fold uses this accessibility service to show the fold effect and receive touches while the effect runs, sending remapped coordinates back to the app underneath through authorized Shizuku. Screen frames are processed only in local memory: never saved, never uploaded. The effect starts only when you tap start inside the app. Exit immediately with a three-finger touch or the stop button in the notification. Original touch control is restored when the effect stops, disconnects, or the screen turns off.</string>
+    <string name="service_label">Duo Fold screen effect</string>
+</resources>

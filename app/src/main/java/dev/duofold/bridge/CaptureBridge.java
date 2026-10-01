@@ -9,6 +9,7 @@ import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.hardware.HardwareBuffer;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -49,6 +50,7 @@ public final class CaptureBridge extends IFoldBridge.Stub {
 
     @Override public Bundle probe() {
         Bundle result=new Bundle();result.putInt("uid",Process.myUid());
+        result.putInt("sdk",Build.VERSION.SDK_INT);
         try {
             initInput();
             Throwable failure=null;
@@ -89,15 +91,40 @@ public final class CaptureBridge extends IFoldBridge.Stub {
                 Class<?> api=Class.forName(owner);
                 Class<?> args=Class.forName(owner+"$CaptureArgs");
                 Class<?> listenerType=Class.forName(owner+"$ScreenCaptureListener");
-                capture=Class.forName("android.view.IWindowManager")
-                        .getMethod("captureDisplay",int.class,args,listenerType);
-                createCaptureListener=api.getMethod("createSyncCaptureListener");
+                // Android can evolve captureDisplay between releases; try known signatures.
+                Method captureMethod=null;
+                for(Method candidate:Class.forName("android.view.IWindowManager").getMethods()) {
+                    if(!"captureDisplay".equals(candidate.getName()))continue;
+                    Class<?>[] p=candidate.getParameterTypes();
+                    if(p.length>=3 && p[0]==int.class && p[1]==args && p[2]==listenerType) {captureMethod=candidate;break;}
+                }
+                if(captureMethod==null)throw new NoSuchMethodException("IWindowManager.captureDisplay(int,"+args.getSimpleName()+","+listenerType.getSimpleName()+")");
+                capture=captureMethod;
+                createCaptureListener=resolveListenerFactory(api);
                 getCaptureBuffer=Class.forName(owner+"$SynchronousScreenCaptureListener").getMethod("getBuffer");
                 iwmCaptureOwner=owner;backend=IWM_CAPTURE;return;
             } catch(Throwable e) {failure=append(failure,e);}
         }
         if(failure instanceof Exception)throw (Exception)failure;
         throw new IllegalStateException("IWindowManager capture unavailable",failure);
+    }
+
+    /** Newer builds may require a handler or flags parameter on the listener factory. */
+    private static Method resolveListenerFactory(Class<?> api) throws Exception {
+        try {return api.getMethod("createSyncCaptureListener");}
+        catch(NoSuchMethodException ignored) {}
+        for(Method candidate:api.getMethods()) {
+            if(!"createSyncCaptureListener".equals(candidate.getName()))continue;
+            Class<?>[] p=candidate.getParameterTypes();
+            if(p.length==1 && (p[0]==android.os.Handler.class || p[0]==int.class))return candidate;
+        }
+        throw new NoSuchMethodException("createSyncCaptureListener");
+    }
+
+    private Object newSyncListener() throws Exception {
+        if(createCaptureListener.getParameterCount()==0)return createCaptureListener.invoke(null);
+        Class<?> p=createCaptureListener.getParameterTypes()[0];
+        return createCaptureListener.invoke(null,p==int.class?0:null);
     }
 
     private void initSurfaceCapture() throws Exception {
@@ -154,8 +181,23 @@ public final class CaptureBridge extends IFoldBridge.Stub {
 
     private void markExcluded(SurfaceControl layer) throws Exception {
         try(SurfaceControl.Transaction transaction=new SurfaceControl.Transaction()) {
-            SurfaceControl.Transaction.class.getMethod("setSkipScreenshot",SurfaceControl.class,boolean.class)
-                    .invoke(transaction,layer,true);
+            boolean applied=false;
+            for(Method candidate:SurfaceControl.Transaction.class.getMethods()) {
+                if(!"setSkipScreenshot".equals(candidate.getName()))continue;
+                Class<?>[] p=candidate.getParameterTypes();
+                if(p.length>=2 && p[0]==SurfaceControl.class && p[1]==boolean.class) {
+                    try {
+                        if(p.length==2)candidate.invoke(transaction,layer,true);
+                        else {
+                            Object[] argv=new Object[p.length];argv[0]=layer;argv[1]=Boolean.TRUE;
+                            for(int i=2;i<p.length;i++)argv[i]=p[i]==long.class?0L:null;
+                            candidate.invoke(transaction,argv);
+                        }
+                        applied=true;break;
+                    } catch(InvocationTargetException skipped) {}
+                }
+            }
+            if(!applied)throw new NoSuchMethodException("Transaction.setSkipScreenshot");
             transaction.apply();
         }
     }
@@ -167,17 +209,18 @@ public final class CaptureBridge extends IFoldBridge.Stub {
             Object builder=builderClass.getConstructor().newInstance();
             float sx=width/(float)Math.max(1,options.getInt("displayWidth",width));
             float sy=height/(float)Math.max(1,options.getInt("displayHeight",height));
-            builderClass.getMethod("setFrameScale",float.class,float.class).invoke(builder,sx,sy);
-            builderClass.getMethod("setExcludeLayers",SurfaceControl[].class)
-                    .invoke(builder,(Object)new SurfaceControl[]{exclude});
-            argsExclude=true;
+            tryOptional(builderClass,"setFrameScale",builder,float.class,float.class,sx,sy);
+            try {
+                builderClass.getMethod("setExcludeLayers",SurfaceControl[].class)
+                        .invoke(builder,(Object)new SurfaceControl[]{exclude});
+                argsExclude=true;
+            } catch(NoSuchMethodException ignored) {}
             configureContentPolicy(builderClass,builder);
             captureArgs=builderClass.getMethod("build").invoke(builder);
         } else if(backend==SCREEN_CAPTURE||backend==SURFACE_CAPTURE) {
             String owner=backend==SCREEN_CAPTURE?"android.window.ScreenCapture":"android.view.SurfaceControl";
             Class<?> builderClass=Class.forName(owner+"$DisplayCaptureArgs$Builder");
-            Object builder=builderClass.getConstructor(IBinder.class).newInstance(displayToken);
-            builderClass.getMethod("setSize",int.class,int.class).invoke(builder,width,height);
+            Object builder=resolveDisplayCaptureBuilder(builderClass,width,height);
             try {
                 builderClass.getMethod("setExcludeLayers",SurfaceControl[].class)
                         .invoke(builder,(Object)new SurfaceControl[]{exclude});
@@ -188,14 +231,52 @@ public final class CaptureBridge extends IFoldBridge.Stub {
         }
     }
 
-    private static void configureContentPolicy(Class<?> builderClass,Object builder) throws Exception {
+    /** Some releases take (IBinder, width, height) or setSize; probe for what exists. */
+    private Object resolveDisplayCaptureBuilder(Class<?> builderClass,int width,int height) throws Exception {
         try {
-            builderClass.getMethod("setCaptureSecureLayers",boolean.class).invoke(builder,false);
-            builderClass.getMethod("setAllowProtected",boolean.class).invoke(builder,false);
-        } catch(NoSuchMethodException legacyApiMissing) {
-            // Newer AOSP-derived ROMs replaced the booleans with explicit redact policies.
-            builderClass.getMethod("setSecureContentPolicy",int.class).invoke(builder,0);
-            builderClass.getMethod("setProtectedContentPolicy",int.class).invoke(builder,0);
+            Object builder=builderClass.getConstructor(IBinder.class,int.class,int.class)
+                    .newInstance(displayToken,width,height);
+            tryOptional(builderClass,"setSize",builder,int.class,int.class,width,height);
+            return builder;
+        } catch(NoSuchMethodException ignored) {}
+        Object builder=builderClass.getConstructor(IBinder.class).newInstance(displayToken);
+        tryOptional(builderClass,"setSize",builder,int.class,int.class,width,height);
+        return builder;
+    }
+
+    private static void tryOptional(Class<?> builderClass,String name,Object target,Class<?>[] types,Object... values) {
+        try {builderClass.getMethod(name,types).invoke(target,values);}
+        catch(NoSuchMethodException ignored) {}
+        catch(Exception ignored) {}
+    }
+    private static void tryOptional(Class<?> builderClass,String name,Object target,Class<?> type,Object value) {
+        tryOptional(builderClass,name,target,new Class<?>[]{type},value);
+    }
+    private static void tryOptional(Class<?> builderClass,String name,Object target,Class<?> t1,Class<?> t2,Object v1,Object v2) {
+        tryOptional(builderClass,name,target,new Class<?>[]{t1,t2},v1,v2);
+    }
+
+    /** Content policy APIs differ per release; a failure here must never abort the capture. */
+    private static void configureContentPolicy(Class<?> builderClass,Object builder) {
+        for(Method candidate:builderClass.getMethods()) {
+            if(!candidate.getName().startsWith("set")||candidate.getParameterCount()!=1)continue;
+            Class<?> p=candidate.getParameterTypes()[0];
+            String name=candidate.getName();
+            boolean relevant=(name.equals("setCaptureSecureLayers")&&p==boolean.class)
+                    ||(name.equals("setAllowProtected")&&p==boolean.class)
+                    ||(name.equals("setSecureContentPolicy")&&p==int.class)
+                    ||(name.equals("setProtectedContentPolicy")&&p==int.class)
+                    ||(name.equals("setCaptureSecureLayersPolicy")&&p.isEnum())
+                    ||(name.equals("setProtectedContentPolicyEnum")&&p.isEnum());
+            if(!relevant)continue;
+            try {
+                if(p==boolean.class)candidate.invoke(builder,Boolean.FALSE);
+                else if(p==int.class)candidate.invoke(builder,0);
+                else {
+                    Object[] constants=p.getEnumConstants();
+                    if(constants!=null)candidate.invoke(builder,constants[0]);
+                }
+            } catch(Throwable ignored) {}
         }
     }
 
@@ -213,7 +294,7 @@ public final class CaptureBridge extends IFoldBridge.Stub {
                 } else {
                     Object screenshot;
                     if(backend==IWM_CAPTURE) {
-                        Object sync=createCaptureListener.invoke(null);
+                        Object sync=newSyncListener();
                         capture.invoke(windowManager,0,captureArgs,sync);
                         screenshot=getCaptureBuffer.invoke(sync);
                     } else screenshot=capture.invoke(null,captureArgs);
@@ -221,7 +302,12 @@ public final class CaptureBridge extends IFoldBridge.Stub {
                     Class<?> sc=screenshot.getClass();
                     buffer=(HardwareBuffer)sc.getMethod("getHardwareBuffer").invoke(screenshot);
                     if(buffer==null)throw new IllegalStateException("Empty capture buffer.");
-                    boolean secure=(boolean)sc.getMethod("containsSecureLayers").invoke(screenshot);
+                    boolean secure=false;
+                    try {secure=(boolean)sc.getMethod("containsSecureLayers").invoke(screenshot);}
+                    catch(NoSuchMethodException legacyCheckMissing) {
+                        try {secure=(boolean)sc.getMethod("hasSecureLayers").invoke(screenshot);}
+                        catch(Exception ignored) {}
+                    }
                     if(secure||(buffer.getUsage()&HardwareBuffer.USAGE_PROTECTED_CONTENT)!=0)
                         throw new IllegalStateException("Protected content: returning to original display.");
                     ColorSpace color=(ColorSpace)sc.getMethod("getColorSpace").invoke(screenshot);
