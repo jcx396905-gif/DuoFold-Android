@@ -8,8 +8,8 @@ android {
         applicationId 'dev.duofold'
         minSdk 29
         targetSdk 36
-        versionCode 7
-        versionName '0.6.0'
+        versionCode 8
+        versionName '0.6.1'
         testInstrumentationRunner 'android.test.InstrumentationTestRunner'
     }
     flavorDimensions 'api'
@@ -26,7 +26,19 @@ android {
     buildFeatures { aidl true; buildConfig true }
     testOptions { unitTests.returnDefaultValues = true }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-    buildTypes { release { minifyEnabled false } }
+    // Releases are signed with the local debug key, matching every published APK so far.
+    signingConfigs {
+        release {
+            storeFile file("${System.getProperty('user.home')}/.android/debug.keystore")
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        debug
+        release { minifyEnabled false; signingConfig signingConfigs.release }
+    }
 }
 dependencies {
     implementation project(':motion')
