@@ -38,8 +38,8 @@ DuoFold turns the entire Android display into a motion-driven spatial surface. A
 
 ## Download
 
-- **Android 14 and newer:** download `DuoFold-0.6.2-Android14-and-newer.apk` from the [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
-- **Android 10–13:** download `DuoFold-0.6.2-Android10-13.apk` from the same [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
+- **Android 14 and newer:** download `DuoFold-0.6.1-Android14-and-newer.apk` from the [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
+- **Android 10–13:** download `DuoFold-0.6.1-Android10-13.apk` from the same [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
 
 ## Features
 
@@ -105,7 +105,7 @@ Default parameters use an **80° maximum tilt angle**, **100% spatial strength**
 - DuoFold changes only the final displayed image. It does not rearrange icons, text, or components inside third-party apps.
 - Extended use increases GPU load and battery consumption.
 
-## Screen-off recovery (0.6.2)
+## Screen-off recovery (0.6.2 source; release signing pending)
 
 Global mode now preserves its resume request across screen-off, delayed Shizuku reconnection, and system accessibility-service recreation. The overlay, sensors, and touch remapping are suspended while the device is non-interactive or locked. Recovery checks the actual power/keyguard state on screen-on, unlock, service connection, and window events; it waits for Shizuku and rebuilds the capture surface. Failed resume starts are limited to three attempts. Manual stop, trial mode, and disabling the accessibility service cancel recovery.
 
@@ -180,8 +180,8 @@ Released under the MIT License. Third-party license notices are available at `ap
 
 ## 下载
 
-- **Android 14 及以上：**从 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.2-Android14-and-newer.apk`。
-- **Android 10–13：**从同一个 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.2-Android10-13.apk`。
+- **Android 14 及以上：**从 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.1-Android14-and-newer.apk`。
+- **Android 10–13：**从同一个 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.1-Android10-13.apk`。
 
 ## 功能
 
