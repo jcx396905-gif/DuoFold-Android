@@ -74,7 +74,7 @@ public final class MainActivity extends Activity {
         trial=button(setup,t("03   体验 10 秒","03   Try for 10 seconds"),()->requestStart(true),true);
         start=button(setup,t("04   开启全局效果","04   Start full-screen effect"),()-> {
             FoldService s=FoldService.current();
-            if(s!=null && s.isActive()) s.stopSession(t("已手动停止","Stopped manually"));else requestStart(false);
+            if(s!=null && (s.isActive() || s.isResumePending())) s.stopSession(t("已手动停止","Stopped manually"));else requestStart(false);
         },false);
         button(setup,t("重新校准当前握姿","Recalibrate current grip"),()-> {
             FoldService s=FoldService.current();if(s!=null && s.isActive()) {s.calibrate();Toast.makeText(this,t("已校准","Calibrated"),Toast.LENGTH_SHORT).show();}
@@ -142,9 +142,9 @@ public final class MainActivity extends Activity {
         liveStatus.setText(s!=null?s.status():prefs.getString("lastStatus",t("准备就绪后，先体验 10 秒","Once ready, try it for 10 seconds")));
         progressText.setText(active?t("展开 "+Math.round(s.progress()*100)+"%  ·  已更新 "+s.frames()+" 帧",
                 "Fold "+Math.round(s.progress()*100)+"%  ·  "+s.frames()+" frames updated"):"");
-        start.setText(active?t("停止并恢复原始屏幕","Stop & restore original screen"):t("04   开启全局效果","04   Start full-screen effect"));
+        start.setText((active || s!=null && s.isResumePending())?t("停止并恢复原始屏幕","Stop & restore original screen"):t("04   开启全局效果","04   Start full-screen effect"));
         trial.setEnabled(!active && s!=null && client.service()!=null);
-        start.setEnabled(active || s!=null && client.service()!=null);
+        start.setEnabled(active || s!=null && (s.isResumePending() || client.service()!=null));
     }
     private void requestStart(boolean isTrial) {
         if(Build.VERSION.SDK_INT>=33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) {

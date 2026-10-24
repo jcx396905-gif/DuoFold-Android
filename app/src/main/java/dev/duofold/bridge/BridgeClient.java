@@ -11,7 +11,6 @@ import android.os.Looper;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
 import rikka.shizuku.Shizuku;
 
 import static dev.duofold.UiText.t;
@@ -30,12 +29,13 @@ public final class BridgeClient {
     private boolean binding;
     private int bindAttempt;
     private volatile int probeGeneration;
-    private final AtomicBoolean timeoutArmed=new AtomicBoolean();
+    private Runnable bindingTimeout;
     private BridgeClient(Context context) {
         args=new Shizuku.UserServiceArgs(new ComponentName(context,CaptureBridge.class))
                 .daemon(false).processNameSuffix("capture").debuggable(true).version(USER_SERVICE_VERSION);
         Shizuku.addBinderReceivedListenerSticky(()->main.post(this::connect));
         Shizuku.addBinderDeadListener(()->main.post(()-> {
+            probeGeneration++;cancelBindingTimeout();
             bridge=null;binding=false;bindAttempt=0;message=t("Shizuku 已断开","Shizuku disconnected");notifyObservers();
         }));
         Shizuku.addRequestPermissionResultListener((code,result)-> {
@@ -48,7 +48,7 @@ public final class BridgeClient {
     }
     public IFoldBridge service() { return bridge; }
     public String message() { return message; }
-    public void addObserver(Runnable observer) { observers.add(observer); }
+    public void addObserver(Runnable observer) { observers.addIfAbsent(observer); }
     public void removeObserver(Runnable observer) { observers.remove(observer); }
     public void request() {
         try {
@@ -63,6 +63,7 @@ public final class BridgeClient {
             if(Shizuku.checkSelfPermission()!=PackageManager.PERMISSION_GRANTED) {
                 message=t("Shizuku 已启动，等待授权","Shizuku is running; waiting for authorization");notifyObservers();return;
             }
+            probeGeneration++;cancelBindingTimeout();
             binding=true; message=t("正在连接系统画面服务","Connecting to the screen capture service");notifyObservers();
             try {Shizuku.unbindUserService(args,connection,true);} catch(Throwable ignored) {}
             Shizuku.bindUserService(args,connection);
@@ -70,13 +71,12 @@ public final class BridgeClient {
         } catch(Exception e) {binding=false;message=e.toString();notifyObservers();}
     }
     /** If Shizuku never starts the user service (wireless adb dropped, ROM killed it, stale cached
-     *  process), reset the state and retry once before surfacing actionable guidance. */
+     *  process), reset the state and retry at most twice before surfacing actionable guidance. */
     private void armBindingTimeout() {
-        timeoutArmed.set(true);
-        main.postDelayed(()-> {
-            if(!timeoutArmed.compareAndSet(true,false)) return;
-            if(bridge!=null || !binding) return;
-            binding=false;
+        final int attempt=probeGeneration;
+        bindingTimeout=()-> {
+            if(attempt!=probeGeneration || bridge!=null || !binding) return;
+            probeGeneration++;binding=false;
             try {Shizuku.unbindUserService(args,connection,true);} catch(Throwable ignored) {}
             bindAttempt++;
             if(bindAttempt<=2) {message=t("连接超时，正在重试 (n/2)","Connection timed out; retrying (n/2)").replace("n",String.valueOf(bindAttempt));notifyObservers();connect();}
@@ -85,13 +85,17 @@ public final class BridgeClient {
                         "Screen capture service connection timed out: make sure Shizuku is running (keep wireless debugging connected), stop Duo Fold's user service inside the Shizuku app, then retry");
                 notifyObservers();
             }
-        },BIND_TIMEOUT_MS);
+        };
+        main.postDelayed(bindingTimeout,BIND_TIMEOUT_MS);
+    }
+    private void cancelBindingTimeout() {
+        if(bindingTimeout!=null) {main.removeCallbacks(bindingTimeout);bindingTimeout=null;}
     }
     private void onBound(IFoldBridge candidate,String readyMessage) {
-        timeoutArmed.set(false);binding=false;bindAttempt=0;bridge=candidate;message=readyMessage;notifyObservers();
+        cancelBindingTimeout();binding=false;bindAttempt=0;bridge=candidate;message=readyMessage;notifyObservers();
     }
     private void onBindFailed(String reason) {
-        timeoutArmed.set(false);binding=false;bridge=null;message=reason;notifyObservers();
+        cancelBindingTimeout();binding=false;bridge=null;message=reason;notifyObservers();
     }
     private final ServiceConnection connection=new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name,IBinder binder) {
@@ -111,7 +115,7 @@ public final class BridgeClient {
             });
         }
         @Override public void onServiceDisconnected(ComponentName name) {
-            probeGeneration++;bridge=null;binding=false;
+            probeGeneration++;cancelBindingTimeout();bridge=null;binding=false;
             message=t("系统画面服务已断开","Screen capture service disconnected");notifyObservers();
             main.postDelayed(()-> {if(bridge==null && !binding) connect();},1000);
         }

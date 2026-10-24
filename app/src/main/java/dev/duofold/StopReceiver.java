@@ -7,5 +7,6 @@ public final class StopReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context c,Intent i) {
         FoldService service=FoldService.current();
         if(service!=null) service.stopSession(t("已手动停止","Stopped manually"));
+        else c.getSharedPreferences("duo",0).edit().putBoolean("resumeGlobalEffect",false).apply();
     }
 }

@@ -2,6 +2,7 @@ package dev.duofold;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.app.KeyguardManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -16,6 +17,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -54,44 +56,89 @@ public final class FoldService extends AccessibilityService {
     private long lastFrame,started,trialEnd,frames;
     private float progress=1,intensity=1;
     private String status=t("尚未开启","Not started");
-    private boolean resumeAfterUnlock;
+    private SessionRecovery recovery;
+    private boolean connected,receiverRegistered;
+    private final Runnable resumeSession=()-> {
+        if(!connected || recovery==null || !recovery.pending() || active) return;
+        if(!screenUsable()) {
+            // SCREEN_ON may arrive while the keyguard is still dismissing; USER_PRESENT
+            // is not delivered on every OEM/no-lock configuration.
+            if(getSystemService(PowerManager.class).isInteractive()) main.postDelayed(this.resumeSession,1000);
+            return;
+        }
+        if(client.service()==null) {client.connect();return;}
+        if(recovery.canResume(active,true,false,true)) {
+            recovery.beginResume();
+            startSessionInternal(false);
+        }
+    };
     private final Runnable bridgeChanged=()-> {
-        if(active && client.service()==null) stopSession(t("Shizuku 断开，已恢复原始屏幕","Shizuku disconnected; original screen restored"));
+        if(!connected) return;
+        if(active && client.service()==null) {
+            if(recovery.requested()) suspendSession(t("等待 Shizuku 重连后恢复","Waiting for Shizuku to reconnect"));
+            else stopSession(t("Shizuku 断开，已恢复原始屏幕","Shizuku disconnected; original screen restored"));
+        }
+        scheduleResume();
     };
     private final BroadcastReceiver screenState=new BroadcastReceiver() {
         @Override public void onReceive(Context context,Intent intent) {
             if(Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
-                // Suspend the effect while the screen is off; resume once the user unlocks.
-                boolean resumable=active && trialEnd==0;
-                stopSession(t("屏幕已关闭，解锁后自动恢复","Screen off; resumes after unlock"));
-                resumeAfterUnlock=resumable;
-            } else if(Intent.ACTION_USER_PRESENT.equals(intent.getAction())) {
-                if(!resumeAfterUnlock || active) return;
-                resumeAfterUnlock=false;
-                main.postDelayed(()-> {
-                    if(active || client==null || client.service()==null) return;
-                    startSession(false);
-                },400);
-            }
+                if(active || recovery.pending()) suspendSession(t("屏幕已关闭，解锁后自动恢复","Screen off; resumes after unlock"));
+            } else if(Intent.ACTION_SCREEN_ON.equals(intent.getAction())
+                    || Intent.ACTION_USER_PRESENT.equals(intent.getAction())) scheduleResume();
         }
     };
     @Override protected void onServiceConnected() {
-        instance=this;wm=getSystemService(WindowManager.class);client=BridgeClient.get(this);
+        if(connected) {scheduleResume();return;}
+        wm=getSystemService(WindowManager.class);client=BridgeClient.get(this);
+        // Reload on every rebind: a stop notification may have cancelled intent while unbound.
+        recovery=new SessionRecovery(getSharedPreferences("duo",0).getBoolean("resumeGlobalEffect",false));
+        connected=true;instance=this;
         client.addObserver(bridgeChanged);client.connect();setIntercept(false);
-        IntentFilter filter=new IntentFilter();
-        filter.addAction(Intent.ACTION_SCREEN_OFF);
-        filter.addAction(Intent.ACTION_USER_PRESENT);
-        if(Build.VERSION.SDK_INT>=33)
-            registerReceiver(screenState,filter,Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(screenState,filter);
+        if(!receiverRegistered) {
+            IntentFilter filter=new IntentFilter();
+            filter.addAction(Intent.ACTION_SCREEN_OFF);
+            filter.addAction(Intent.ACTION_SCREEN_ON);
+            filter.addAction(Intent.ACTION_USER_PRESENT);
+            if(Build.VERSION.SDK_INT>=33)
+                registerReceiver(screenState,filter,Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(screenState,filter);
+            receiverRegistered=true;
+        }
+        scheduleResume();
+    }
+    private boolean screenUsable() {
+        PowerManager power=getSystemService(PowerManager.class);
+        KeyguardManager keyguard=getSystemService(KeyguardManager.class);
+        return power!=null && power.isInteractive() && keyguard!=null && !keyguard.isKeyguardLocked();
+    }
+    private void scheduleResume() {
+        if(connected && recovery!=null && recovery.pending() && !main.hasCallbacks(resumeSession))
+            main.postDelayed(resumeSession,600);
+    }
+    private void saveRecovery() {
+        getSharedPreferences("duo",0).edit().putBoolean("resumeGlobalEffect",recovery.requested()).apply();
+    }
+    private void suspendSession(String reason) {
+        recovery.suspend();saveRecovery();
+        if(!recovery.requested()) reason=t("屏幕已关闭，已恢复原始屏幕","Screen off; original screen restored");
+        releaseSession(reason);
+        scheduleResume();
+    }
+    private void sessionFailed(String reason) {
+        // Capture/heartbeat errors can arrive before SCREEN_OFF on vendor ROMs.
+        if(recovery!=null && recovery.requested() && (!screenUsable() || recovery.canRetry())) suspendSession(reason);
+        else stopSession(reason);
     }
     public boolean isActive() { return active; }
+    public boolean isResumePending() {return recovery!=null && recovery.pending();}
     public String status() { return status; }
     public float progress() { return progress; }
     public long frames() { return frames; }
     public String diagnostics() { return "active="+active+" ready="+captureReady+" intercept="+intercepting
             +" size="+(view==null?"none":view.getWidth()+"x"+view.getHeight())+" progress="+progress
-            +" frames="+frames+" touches="+touchCount+" status="+status; }
+            +" frames="+frames+" touches="+touchCount+" resume="+(recovery!=null && recovery.pending())
+            +" attempts="+(recovery==null?0:recovery.attempts())+" status="+status; }
     private long touchCount;
     private boolean discardGesture;
     private boolean debugTilt;
@@ -106,10 +153,19 @@ public final class FoldService extends AccessibilityService {
     public void setEffectStyle(EffectStyle style) {if(view!=null)view.setEffectStyle(style);}
     public void calibrate() { if(sensor!=null) {sensor.calibrate();progress=1;view.setFold(0,0,intensity);} }
     public void startSession(boolean trial) {
-        if(active) return;
+        if(!connected || active) return;
+        main.removeCallbacks(resumeSession);
+        recovery.userStart(trial);saveRecovery();
+        startSessionInternal(trial);
+    }
+    private void startSessionInternal(boolean trial) {
+        if(!screenUsable()) {
+            suspendSession(t("等待亮屏并解锁后恢复","Waiting for screen on and unlock"));return;
+        }
         IFoldBridge bridge=client.service();
-        if(bridge==null) {status=t("先完成 Shizuku 授权","Finish Shizuku authorization first");Toast.makeText(this,status,Toast.LENGTH_LONG).show();return;}
+        if(bridge==null) {recovery.stop();saveRecovery();status=t("先完成 Shizuku 授权","Finish Shizuku authorization first");Toast.makeText(this,status,Toast.LENGTH_LONG).show();return;}
         if(getSystemService(android.view.accessibility.AccessibilityManager.class).isTouchExplorationEnabled()) {
+            recovery.stop();saveRecovery();
             status=t("当前有触摸探索服务运行，请先关闭以避免手势冲突","A touch exploration service is running; turn it off first to avoid gesture conflicts");
             Toast.makeText(this,status,Toast.LENGTH_LONG).show();return;
         }
@@ -130,7 +186,7 @@ public final class FoldService extends AccessibilityService {
             });
             if(!sensor.start()) throw new IllegalStateException(t("没有可用的姿态传感器","No usable pose sensor"));
             showNotification();main.post(watchdog);
-        } catch(Exception e) {stopSession(e.toString());}
+        } catch(Exception e) {sessionFailed(e.toString());}
     }
     private void addOverlay() {
         int overlayGeneration=generation;
@@ -142,11 +198,12 @@ public final class FoldService extends AccessibilityService {
                 if(Build.VERSION.SDK_INT<31 && active && overlayGeneration==generation && !captureReady) {
                     captureReady=true;
                     if(view!=null)view.setAlpha(1f);
+                    recovery.recovered();
                     status=runningStatus();
                 }
             }
             @Override public void onError(String message) {
-                if(overlayGeneration==generation) stopSession(message);
+                if(overlayGeneration==generation) sessionFailed(message);
             }
         });
         view.setEffectStyle(EffectStyle.fromId(getSharedPreferences("duo",0).getString("effectStyle","classic")));
@@ -171,7 +228,7 @@ public final class FoldService extends AccessibilityService {
         if(!active || view==null) return;
         setIntercept(false);captureReady=false;started=SystemClock.uptimeMillis();lastFrame=0;
         SurfaceControl exclude=view.getSurfaceControl();
-        if(exclude==null || !exclude.isValid()) {stopSession(t("无法取得显示层，已取消采集以避免画面递归","Could not get the display layer; capture cancelled to avoid recursion"));return;}
+        if(exclude==null || !exclude.isValid()) {sessionFailed(t("无法取得显示层，已取消采集以避免画面递归","Could not get the display layer; capture cancelled to avoid recursion"));return;}
         Bundle options=new Bundle();options.putParcelable("exclude",exclude);
         options.putInt("width",w);options.putInt("height",h);options.putInt("fps",30);
         options.putInt("displayWidth",view.getWidth());options.putInt("displayHeight",view.getHeight());
@@ -188,27 +245,33 @@ public final class FoldService extends AccessibilityService {
                             lastFrame=SystemClock.uptimeMillis();frames=sequence;
                             if(Build.VERSION.SDK_INT>=31 && !captureReady) {
                                 captureReady=true;
-                                setIntercept(true);status=runningStatus();
+                                if(!screenUsable()) {suspendSession(t("等待解锁","Waiting for unlock"));return;}
+                                try {setIntercept(true);recovery.recovered();status=runningStatus();}
+                                catch(RuntimeException e) {sessionFailed(e.toString());}
                             }
                         });
                     }
-                    @Override public void onError(String message) {main.post(()->{if(session==generation) stopSession(message);});}
+                    @Override public void onError(String message) {main.post(()->{if(session==generation) sessionFailed(message);});}
                 });
-            } catch(Exception e) {main.post(()->{if(session==generation) stopSession(e.toString());});}
+            } catch(Exception e) {main.post(()->{if(session==generation) sessionFailed(e.toString());});}
         });
     }
     private final Runnable watchdog=new Runnable() {
         @Override public void run() {
             if(!active) return;
+            if(!screenUsable()) {suspendSession(t("屏幕已锁定，解锁后自动恢复","Screen locked; resumes after unlock"));return;}
             long now=SystemClock.uptimeMillis();
             if(trialEnd>0 && now>=trialEnd) {stopSession(t("10 秒体验结束，已恢复原始屏幕","10-second trial ended; original screen restored"));return;}
             boolean liveCapture=Build.VERSION.SDK_INT>=31;
             if((liveCapture && lastFrame>0 && now-lastFrame>1500) || (lastFrame==0 && now-started>5000)) {
-                stopSession(t("画面更新超时，已恢复原始屏幕","Frame update timed out; original screen restored"));return;
+                sessionFailed(t("画面更新超时，已恢复原始屏幕","Frame update timed out; original screen restored"));return;
             }
             IFoldBridge bridge=client.service();
-            if(bridge==null) {stopSession(t("Shizuku 服务断开","Shizuku service disconnected"));return;}
-            io.execute(()->{try{bridge.heartbeat();}catch(Exception e){main.post(()->stopSession(t("心跳中断","Heartbeat lost")));}});
+            if(bridge==null) {bridgeChanged.run();return;}
+            int session=generation;
+            io.execute(()->{try{if(session==generation)bridge.heartbeat();}catch(Exception e){main.post(()-> {
+                if(active && session==generation) sessionFailed(t("心跳中断","Heartbeat lost"));
+            });}});
             main.postDelayed(this,500);
         }
     };
@@ -257,9 +320,14 @@ public final class FoldService extends AccessibilityService {
         setServiceInfo(info);intercepting=enabled;
     }
     public void stopSession(String reason) {
+        if(recovery!=null) {recovery.stop();saveRecovery();}
+        releaseSession(reason);
+    }
+    private void releaseSession(String reason) {
+        main.removeCallbacks(resumeSession);
         // Release original input before doing any binder work or GPU cleanup.
-        setIntercept(false);active=false;captureReady=false;generation++;status=reason;
-        resumeAfterUnlock=false;
+        try {setIntercept(false);} catch(RuntimeException e) {android.util.Log.w("DuoFold","Cannot reset input on disconnected service",e);}
+        active=false;captureReady=false;generation++;status=reason;
         android.util.Log.i("DuoFold", "Stopped: "+reason+"; frames="+frames+" touches="+touchCount);
         main.removeCallbacks(watchdog);
         if(sensor!=null) {sensor.stop();sensor=null;}
@@ -269,7 +337,11 @@ public final class FoldService extends AccessibilityService {
             try {wm.removeViewImmediate(old);}catch(Exception ignored){}
         }
         IFoldBridge bridge=client==null?null:client.service();
-        if(bridge!=null) io.execute(()->{try{bridge.stop();}catch(Exception ignored){}});
+        if(bridge!=null) io.execute(()-> {
+            // An old service's teardown must not stop a newly bound service's capture.
+            if(instance!=null && instance!=FoldService.this) return;
+            try{bridge.stop();}catch(Exception ignored){}
+        });
         getSystemService(NotificationManager.class).cancel(81);
         getSharedPreferences("duo",0).edit().putString("lastStatus",reason).apply();
     }
@@ -289,13 +361,34 @@ public final class FoldService extends AccessibilityService {
             catch(Exception e){stopSession(t("横竖屏切换失败：","Orientation switch failed: ")+e.getMessage());}
         }
     }
-    @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
-    @Override public void onInterrupt() {stopSession(t("辅助服务被中断","Accessibility service interrupted"));}
-    @Override public boolean onUnbind(Intent intent) {stopSession(t("辅助服务已关闭","Accessibility service disabled"));return super.onUnbind(intent);}
-    @Override public void onDestroy() {
-        stopSession(t("服务已停止","Service stopped"));instance=null;
+    @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if(active && !screenUsable()) suspendSession(t("屏幕已锁定，解锁后自动恢复","Screen locked; resumes after unlock"));
+        else scheduleResume();
+    }
+    @Override public void onInterrupt() {sessionFailed(t("辅助服务被中断","Accessibility service interrupted"));}
+    private void disconnect() {
+        if(!connected && recovery!=null) return;
+        connected=false;
+        if(instance==this) instance=null;
+        if(recovery!=null) {
+            // A system rebind is different from the user disabling this service in Settings.
+            String enabled=android.provider.Settings.Secure.getString(getContentResolver(),
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            String component=new android.content.ComponentName(this,FoldService.class).flattenToString();
+            boolean stillEnabled=false;
+            if(enabled!=null) for(String name:enabled.split(":"))
+                if(component.equalsIgnoreCase(name) || new android.content.ComponentName(this,FoldService.class)
+                        .flattenToShortString().equalsIgnoreCase(name)) stillEnabled=true;
+            if(stillEnabled) recovery.suspend();else recovery.stop();
+            saveRecovery();
+        }
+        releaseSession(t("辅助服务已断开，等待系统重新连接","Accessibility service disconnected; waiting for system rebind"));
         if(client!=null)client.removeObserver(bridgeChanged);
-        try{unregisterReceiver(screenState);}catch(Exception ignored){}
+        if(receiverRegistered) {try{unregisterReceiver(screenState);}catch(Exception ignored){}receiverRegistered=false;}
+    }
+    @Override public boolean onUnbind(Intent intent) {disconnect();return super.onUnbind(intent);}
+    @Override public void onDestroy() {
+        disconnect();
         io.shutdown();touches.shutdown();super.onDestroy();
     }
     private void showNotification() {

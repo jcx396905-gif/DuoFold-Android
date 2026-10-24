@@ -38,8 +38,8 @@ DuoFold turns the entire Android display into a motion-driven spatial surface. A
 
 ## Download
 
-- **Android 14 and newer:** download `DuoFold-0.6.0-Android14-and-newer.apk` from the [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
-- **Android 10–13:** download `DuoFold-0.6.0-Android10-13.apk` from the same [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
+- **Android 14 and newer:** download `DuoFold-0.6.2-Android14-and-newer.apk` from the [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
+- **Android 10–13:** download `DuoFold-0.6.2-Android10-13.apk` from the same [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest).
 
 ## Features
 
@@ -105,6 +105,12 @@ Default parameters use an **80° maximum tilt angle**, **100% spatial strength**
 - DuoFold changes only the final displayed image. It does not rearrange icons, text, or components inside third-party apps.
 - Extended use increases GPU load and battery consumption.
 
+## Screen-off recovery (0.6.2)
+
+Global mode now preserves its resume request across screen-off, delayed Shizuku reconnection, and system accessibility-service recreation. The overlay, sensors, and touch remapping are suspended while the device is non-interactive or locked. Recovery checks the actual power/keyguard state on screen-on, unlock, service connection, and window events; it waits for Shizuku and rebuilds the capture surface. Failed resume starts are limited to three attempts. Manual stop, trial mode, and disabling the accessibility service cancel recovery.
+
+This addresses code paths implicated by [#4](https://github.com/jcx396905-gif/DuoFold-Android/issues/4) and [#6](https://github.com/jcx396905-gif/DuoFold-Android/issues/6). Samsung S24 Ultra validation is still required; no device-specific fix is claimed. If Android revokes accessibility access or Shizuku permission, restore it in system/Shizuku settings; the app does not bypass those controls.
+
 ## Build from source
 
 JDK 17 and Android SDK 36 are required:
@@ -116,6 +122,19 @@ JDK 17 and Android SDK 36 are required:
 The Android 14+ standard build is generated at `app/build/outputs/apk/standard/debug/app-standard-debug.apk`. The Android 10+ compatibility build is generated at `app/build/outputs/apk/compat/debug/app-compat-debug.apk`.
 
 The project contains two modules: `app` handles Shizuku integration, accessibility services, screen capture, and OpenGL ES rendering; `motion` handles pose-axis mapping, filtering, and projection math and can run independent JVM unit tests.
+
+### Release signing
+
+Use the original signing key for an in-place update. Never generate a replacement debug key and label it as an upgrade-compatible release. Without an explicit key path, release tasks produce **unsigned APKs**, which cannot be installed until signed.
+
+```shell
+# Set DUOFOLD_STORE_PASSWORD and DUOFOLD_KEY_PASSWORD privately when not using the old debug-key defaults.
+./gradlew :app:assembleStandardRelease :app:assembleCompatRelease \
+  -PduofoldKeystore=/absolute/path/to/original.keystore \
+  -PduofoldKeyAlias=androiddebugkey
+```
+
+Compare the resulting APK signing certificate with the previous release before publishing. Debug APKs generated on another machine generally cannot replace the published APK.
 
 ## Author
 
@@ -161,8 +180,8 @@ Released under the MIT License. Third-party license notices are available at `ap
 
 ## 下载
 
-- **Android 14 及以上：**从 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.0-Android14-and-newer.apk`。
-- **Android 10–13：**从同一个 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.0-Android10-13.apk`。
+- **Android 14 及以上：**从 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.2-Android14-and-newer.apk`。
+- **Android 10–13：**从同一个 [Latest Release](https://github.com/jcx396905-gif/DuoFold-Android/releases/latest) 下载 `DuoFold-0.6.2-Android10-13.apk`。
 
 ## 功能
 
