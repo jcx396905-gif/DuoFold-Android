@@ -78,7 +78,7 @@ public final class FoldService extends AccessibilityService {
             if(recovery.requested()) suspendSession(t("等待 Shizuku 重连后恢复","Waiting for Shizuku to reconnect"));
             else stopSession(t("Shizuku 断开，已恢复原始屏幕","Shizuku disconnected; original screen restored"));
         }
-        scheduleResume();
+        if(client.service()!=null) scheduleResume();
     };
     private final BroadcastReceiver screenState=new BroadcastReceiver() {
         @Override public void onReceive(Context context,Intent intent) {
